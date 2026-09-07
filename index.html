@@ -264,6 +264,11 @@
     background:rgba(255,255,255,.06);border:1px solid var(--line);color:var(--ink);
     width:32px;height:32px;border-radius:9px;display:grid;place-items:center;cursor:pointer;flex:0 0 auto
   }
+  .err{
+    font-size:12.5px;color:#FFC0D8;background:rgba(232,49,129,.12);
+    border:1px solid rgba(232,49,129,.42);border-radius:11px;padding:10px 12px;margin-bottom:12px
+  }
+  .syncbad{color:#FFC46B}
   .note{
     font-size:12px;color:#FFC46B;background:rgba(255,196,107,.09);
     border:1px solid rgba(255,196,107,.25);border-radius:11px;padding:10px 12px;margin-bottom:14px
@@ -344,30 +349,41 @@
 </button>
 
 <dialog id="dlgPin">
-  <form class="sheet" method="dialog" id="formPin">
+  <div class="sheet">
     <h2>Acesso restrito</h2>
     <div class="sub">Só a coordenação edita a agenda. Todo mundo vê as alterações.</div>
     <div class="field">
       <label for="pin">PIN da coordenação</label>
       <input id="pin" type="password" inputmode="numeric" autocomplete="off" placeholder="••••" />
     </div>
+    <div class="err" id="pinErr" hidden></div>
     <div class="actions">
-      <button class="btn sec" value="cancel" type="submit">Voltar</button>
+      <button class="btn sec" type="button" id="pinCancel">Voltar</button>
       <button class="btn" id="pinOk" type="button">Entrar</button>
     </div>
-  </form>
+  </div>
 </dialog>
 
 <dialog id="dlgAdmin">
   <div class="sheet">
     <h2>Gerenciar agenda</h2>
-    <div class="sub">As mudanças aparecem para todo o time na hora que você salva.</div>
+    <div class="sub" id="syncLine">As mudanças aparecem para todo o time na hora que você salva.</div>
     <div class="actions" style="justify-content:flex-start;margin-top:0;margin-bottom:8px">
-      <button class="btn" id="btnNew">Nova agenda</button>
-      <button class="btn sec" id="btnExport">Baixar backup</button>
-      <button class="btn sec" id="btnImport">Restaurar backup</button>
-      <button class="btn sec" id="btnPinChange">Trocar PIN</button>
-      <button class="btn sec" id="btnCloseAdmin">Fechar</button>
+      <button class="btn" type="button" id="btnNew">Nova agenda</button>
+      <button class="btn sec" type="button" id="btnExport">Baixar backup</button>
+      <button class="btn sec" type="button" id="btnImport">Restaurar backup</button>
+      <button class="btn sec" type="button" id="btnPinChange">Trocar PIN</button>
+      <button class="btn sec" type="button" id="btnCloseAdmin">Fechar</button>
+    </div>
+    <div id="pinBox" hidden>
+      <div class="field">
+        <label for="newPin">Novo PIN (4 a 8 números)</label>
+        <input id="newPin" type="text" inputmode="numeric" autocomplete="off" placeholder="1111" />
+      </div>
+      <div class="actions" style="margin-top:0">
+        <button class="btn sec" type="button" id="btnPinCancel">Cancelar</button>
+        <button class="btn" type="button" id="btnPinSave">Salvar PIN</button>
+      </div>
     </div>
     <input type="file" id="fileImport" accept="application/json" hidden />
     <div class="adminlist" id="adminList"></div>
@@ -375,18 +391,18 @@
 </dialog>
 
 <dialog id="dlgEdit">
-  <form class="sheet" id="formEdit">
+  <div class="sheet" id="formEdit">
     <h2 id="editTitle">Nova agenda</h2>
     <div class="sub">Preencha o local do jeito que o Google Maps entende: ponto de referência, rua, bairro, cidade.</div>
 
     <div class="row">
       <div class="field">
         <label for="f_date">Data</label>
-        <input id="f_date" type="date" required />
+        <input id="f_date" type="date" />
       </div>
       <div class="field">
         <label for="f_city">Cidade</label>
-        <input id="f_city" type="text" placeholder="Tarauacá" required />
+        <input id="f_city" type="text" placeholder="Tarauacá" />
       </div>
     </div>
 
@@ -414,7 +430,7 @@
 
     <div class="field">
       <label for="f_title">Título</label>
-      <input id="f_title" type="text" placeholder="Bandeiraço na praça da COHAB" required />
+      <input id="f_title" type="text" placeholder="Bandeiraço na praça da COHAB" />
     </div>
 
     <div class="field">
@@ -488,12 +504,14 @@
       </div>
     </div>
 
+    <div class="err" id="editErr" hidden></div>
+
     <div class="actions">
       <button type="button" class="btn danger" id="btnDelete">Excluir</button>
-      <button type="button" class="btn sec" id="btnCancelEdit">Cancelar</button>
-      <button type="submit" class="btn">Salvar</button>
+      <button type="button" class="btn sec" id="btnCancelEdit">Fechar</button>
+      <button type="button" class="btn" id="btnSave">Salvar</button>
     </div>
-  </form>
+  </div>
 </dialog>
 
 <div class="toast" id="toast"></div>
@@ -508,22 +526,36 @@ const KEY_EVENTS = 'agenda:v1:events';
 const KEY_CONFIG = 'agenda:v1:config';
 const DEFAULT_PIN = '1111';
 
-/* ---------------- storage (com fallback em memória) ---------------- */
+/* ---------------- storage (com timeout, fallback e verificação) ---------------- */
 const mem = {};
+let syncOk = false;     // última gravação chegou ao armazenamento compartilhado?
+let dirty  = false;     // existe alteração local ainda não publicada?
+
+function withTimeout(promise, ms){
+  return Promise.race([
+    promise,
+    new Promise((_,rej)=> setTimeout(()=> rej(new Error('timeout')), ms))
+  ]);
+}
+
 const store = {
   ok(){ return typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function'; },
   async get(k){
     if(this.ok()){
-      try{ const r = await window.storage.get(k, true); if(r && r.value) return JSON.parse(r.value); }
-      catch(e){ /* chave inexistente */ }
+      try{
+        const r = await withTimeout(window.storage.get(k, true), 4000);
+        if(r && r.value) return JSON.parse(r.value);
+      }catch(e){ /* chave inexistente, offline ou lento */ }
     }
     return mem[k] ?? null;
   },
   async set(k,v){
-    mem[k]=v;
+    mem[k] = v;                                  // memória primeiro: a tela nunca fica travada
     if(this.ok()){
-      try{ await window.storage.set(k, JSON.stringify(v), true); return true; }
-      catch(e){ return false; }
+      try{
+        await withTimeout(window.storage.set(k, JSON.stringify(v), true), 5000);
+        return true;
+      }catch(e){ return false; }
     }
     return false;
   }
@@ -882,6 +914,11 @@ function renderAdminList(){
       <div class="arow" ${e.status==='cancelada'?'style="opacity:.6"':''}>
         <div class="at" ${e.status==='cancelada'?'style="text-decoration:line-through"':''}>${esc(e.time || PERIOD_LABEL[e.period] || '—')}</div>
         <div class="an">${e.status==='cancelada'?`<s>${esc(e.title)}</s>`:esc(e.title)}<span>${e.status==='cancelada'?'Cancelada · ':''}${esc([TYPES[e.type].label, e.place, e.city].filter(Boolean).join(' · '))}</span></div>
+        <button class="icon-btn" data-toggle="${e.id}" title="${e.status==='cancelada'?'Reativar agenda':'Cancelar agenda'}">
+          ${e.status==='cancelada'
+            ? `<svg viewBox="0 0 24 24" width="15" height="15" ${S}><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/></svg>`
+            : `<svg viewBox="0 0 24 24" width="15" height="15" ${S}><circle cx="12" cy="12" r="8.4"/><path d="m8.6 8.6 6.8 6.8"/></svg>`}
+        </button>
         <button class="icon-btn" data-edit="${e.id}" title="Editar">
           <svg viewBox="0 0 24 24" width="15" height="15" ${S}><path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/></svg>
         </button>
@@ -889,6 +926,7 @@ function renderAdminList(){
     return `<div class="adminday">${WD_LONG[dt.getDay()]} · ${String(dt.getDate()).padStart(2,'0')}/${String(dt.getMonth()+1).padStart(2,'0')}</div>${rows}`;
   }).join('');
   box.querySelectorAll('[data-edit]').forEach(b=> b.onclick = ()=> openEdit(b.dataset.edit));
+  box.querySelectorAll('[data-toggle]').forEach(b=> b.onclick = ()=> toggleCancel(b.dataset.toggle));
 }
 
 function openEdit(id){
@@ -912,17 +950,37 @@ function openEdit(id){
   $('#f_pending').value = e?.pending ? '1' : '';
   $('#f_status').value = e?.status || '';
   $('#f_cancelnote').value = e?.cancelNote || '';
+  $('#f_cancelnote').disabled = ($('#f_status').value !== 'cancelada');
+  $('#f_cancelnote').parentElement.style.opacity = ($('#f_status').value === 'cancelada') ? '1' : '.45';
+  $('#f_period').disabled = !!$('#f_time').value;
+  pendingDelete = null; $('#btnDelete').textContent = 'Excluir'; showEditErr('');
   $('#btnDelete').style.display = e ? '' : 'none';
-  $('#dlgEdit').showModal();
+  openDlg('#dlgEdit');
 }
 
-async function saveEvent(ev){
-  ev.preventDefault();
-  const data = {
+function normalize(arr){
+  return arr.map((e,i)=>({
+    id: e.id || 'n'+i+Date.now().toString(36),
+    date:'', time:'', period:'', type:'reuniao', title:'', desc:'', place:'', city:'',
+    lat:'', lng:'', who:'majoritario', resp:'', part:'', simul:'', pending:false,
+    status:'', cancelNote:'', ...e
+  })).filter(e=>e.date && e.title);
+}
+
+function showEditErr(msg){
+  const b = $('#editErr');
+  if(!msg){ b.hidden = true; b.textContent=''; return; }
+  b.hidden = false; b.textContent = msg;
+}
+
+function readForm(){
+  const time = $('#f_time').value;
+  const status = $('#f_status').value;
+  return {
     id: editingId || 'e' + Date.now().toString(36),
     date: $('#f_date').value,
-    time: $('#f_time').value || '',
-    period: $('#f_time').value ? '' : ($('#f_period').value || ''),
+    time: time || '',
+    period: time ? '' : ($('#f_period').value || 'dia'),
     type: $('#f_type').value,
     title: $('#f_title').value.trim(),
     desc: $('#f_desc').value.trim(),
@@ -935,33 +993,100 @@ async function saveEvent(ev){
     part: $('#f_part').value.trim(),
     simul: $('#f_simul').value,
     pending: $('#f_pending').value === '1',
-    status: $('#f_status').value,
-    cancelNote: $('#f_status').value === 'cancelada' ? $('#f_cancelnote').value.trim() : ''
+    status,
+    cancelNote: status === 'cancelada' ? $('#f_cancelnote').value.trim() : ''
   };
-  if(!data.title || !data.date){ toast('Preencha título e data'); return; }
-  if(!data.time && !data.period) data.period = 'dia';
+}
+
+/* grava em memória, redesenha na hora e só então tenta publicar */
+async function commit(msgOk){
+  dirty = true;
+  renderSync(); renderAdminList(); render();
+  const ok = await store.set(KEY_EVENTS, EVENTS);
+  syncOk = ok; dirty = !ok;
+  renderSync();
+  toast(ok ? msgOk : 'Salvo neste aparelho. Sem conexão com o armazenamento — o time ainda não vê.');
+}
+
+function saveEvent(){
+  const data = readForm();
+  if(!data.title){ showEditErr('Escreva o título da agenda.'); return; }
+  if(!data.date){ showEditErr('Escolha a data.'); return; }
+  if(data.status === 'cancelada' && !data.cancelNote){
+    data.cancelNote = '';   // motivo é opcional
+  }
+  showEditErr('');
 
   const i = EVENTS.findIndex(x=>x.id===data.id);
   if(i >= 0) EVENTS[i] = data; else EVENTS.push(data);
 
-  const saved = await store.set(KEY_EVENTS, EVENTS);
   selectedDate = data.date;
-  $('#dlgEdit').close();
-  renderAdminList(); render();
-  toast(saved
-    ? (data.status === 'cancelada' ? 'Cancelamento publicado para o time' : 'Agenda salva para o time')
-    : 'Salvo só neste dispositivo (sem conexão de dados)');
+  editingId = null;
+  closeDlg('#dlgEdit');
+  commit(data.status === 'cancelada' ? 'Cancelamento publicado para o time' : 'Agenda publicada para o time');
 }
 
-async function deleteEvent(){
+/* cancelar/reativar direto na lista do painel, sem abrir o formulário */
+function toggleCancel(id){
+  const e = EVENTS.find(x=>x.id===id); if(!e) return;
+  if(e.status === 'cancelada'){ e.status=''; e.cancelNote=''; commit('Agenda reativada'); }
+  else { e.status='cancelada'; commit('Cancelamento publicado para o time'); }
+}
+
+/* exclusão em dois toques, sem depender de confirm() do navegador */
+let pendingDelete = null;
+function askDelete(){
   if(!editingId) return;
-  const e = EVENTS.find(x=>x.id===editingId);
-  if(!confirm(`Excluir “${e.title}”? Todo o time deixa de ver essa agenda.`)) return;
-  EVENTS = EVENTS.filter(x=>x.id!==editingId);
-  await store.set(KEY_EVENTS, EVENTS);
-  $('#dlgEdit').close();
+  if(pendingDelete !== editingId){
+    pendingDelete = editingId;
+    $('#btnDelete').textContent = 'Confirmar exclusão';
+    showEditErr('Excluir apaga a agenda para todo mundo. Se ela só não vai acontecer, use Situação: Cancelada — assim o time fica sabendo.');
+    return;
+  }
+  EVENTS = EVENTS.filter(x=>x.id!==pendingDelete);
+  pendingDelete = null; editingId = null;
+  $('#btnDelete').textContent = 'Excluir';
+  showEditErr('');
+  closeDlg('#dlgEdit');
+  commit('Agenda excluída');
+}
+
+/* ---------------- sincronização entre aparelhos ---------------- */
+function renderSync(){
+  const el = $('#syncLine'); if(!el) return;
+  if(dirty){
+    el.className = 'sub syncbad';
+    el.textContent = 'Alteração salva só neste aparelho. Toque em Salvar novamente quando a conexão voltar.';
+  } else if(syncOk){
+    el.className = 'sub';
+    el.textContent = 'Publicado. O time vê a agenda atualizada.';
+  } else {
+    el.className = 'sub';
+    el.textContent = 'As mudanças aparecem para todo o time na hora que você salva.';
+  }
+}
+
+async function pull(){
+  if(dirty) return;                      // nunca sobrescreve alteração não publicada
+  const saved = await store.get(KEY_EVENTS);
+  if(!Array.isArray(saved) || !saved.length) return;
+  const fresh = normalize(saved);
+  if(JSON.stringify(fresh) === JSON.stringify(EVENTS)) return;
+  EVENTS = fresh;
+  if(!dates().includes(selectedDate)) selectedDate = dates()[0];
   renderAdminList(); render();
-  toast('Agenda excluída');
+}
+
+/* ---------------- diálogos (com fallback se showModal não existir) ---------------- */
+function openDlg(sel){
+  const d = $(sel);
+  if(typeof d.showModal === 'function'){ try{ d.showModal(); return; }catch(e){} }
+  d.setAttribute('open','');
+}
+function closeDlg(sel){
+  const d = $(sel);
+  if(typeof d.close === 'function'){ try{ d.close(); return; }catch(e){} }
+  d.removeAttribute('open');
 }
 
 /* ---------------- eventos de UI ---------------- */
@@ -979,24 +1104,42 @@ $('#fabNow').onclick = ()=>{
 $('#btnCopy').onclick = copyDay;
 $('#q').oninput = e => { query = e.target.value; render(); };
 
+/* acesso ao painel */
 $('#btnAdmin').onclick = ()=>{
-  if(isAdmin){ renderAdminList(); $('#dlgAdmin').showModal(); }
-  else { $('#pin').value=''; $('#dlgPin').showModal(); }
+  if(isAdmin){ renderSync(); renderAdminList(); openDlg('#dlgAdmin'); }
+  else { $('#pin').value=''; $('#pinErr').hidden = true; openDlg('#dlgPin'); }
 };
+$('#pinCancel').onclick = ()=> closeDlg('#dlgPin');
 $('#pinOk').onclick = ()=>{
-  if($('#pin').value === String(CONFIG.pin)){
-    isAdmin = true; $('#dlgPin').close();
-    renderAdminList(); $('#dlgAdmin').showModal();
-  } else toast('PIN incorreto');
+  if($('#pin').value.trim() === String(CONFIG.pin)){
+    isAdmin = true;
+    closeDlg('#dlgPin');
+    renderSync(); renderAdminList(); openDlg('#dlgAdmin');
+  } else {
+    const b = $('#pinErr'); b.hidden = false; b.textContent = 'PIN incorreto. Tente de novo.';
+  }
 };
-$('#formPin').addEventListener('submit', e=>{ if(e.submitter && e.submitter.value==='cancel') return; e.preventDefault(); $('#pinOk').click(); });
+$('#pin').onkeydown = e => { if(e.key === 'Enter') $('#pinOk').click(); };
 
+/* formulário */
 $('#btnNew').onclick = ()=> openEdit(null);
-$('#btnCloseAdmin').onclick = ()=> $('#dlgAdmin').close();
-$('#formEdit').addEventListener('submit', saveEvent);
-$('#btnCancelEdit').onclick = ()=> $('#dlgEdit').close();
-$('#btnDelete').onclick = deleteEvent;
+$('#btnCloseAdmin').onclick = ()=> closeDlg('#dlgAdmin');
+$('#btnSave').onclick = saveEvent;
+$('#btnCancelEdit').onclick = ()=>{
+  pendingDelete = null; $('#btnDelete').textContent = 'Excluir'; showEditErr('');
+  closeDlg('#dlgEdit');
+};
+$('#btnDelete').onclick = askDelete;
+$('#f_status').onchange = ()=>{
+  const off = $('#f_status').value === 'cancelada';
+  $('#f_cancelnote').parentElement.style.opacity = off ? '1' : '.45';
+  $('#f_cancelnote').disabled = !off;
+};
+$('#f_time').onchange = ()=>{
+  $('#f_period').disabled = !!$('#f_time').value;
+};
 
+/* backup */
 $('#btnExport').onclick = ()=>{
   const blob = new Blob([JSON.stringify({ events:EVENTS }, null, 2)], { type:'application/json' });
   const a = document.createElement('a');
@@ -1012,34 +1155,59 @@ $('#fileImport').onchange = async ev=>{
     const parsed = JSON.parse(await f.text());
     const arr = Array.isArray(parsed) ? parsed : parsed.events;
     if(!Array.isArray(arr)) throw new Error('formato');
-    EVENTS = arr.map((e,i)=>({ id:e.id||'i'+i, desc:'', place:'', resp:'', part:'', simul:'', pending:false, lat:'', lng:'', period:'', time:'', who:'majoritario', type:'reuniao', status:'', cancelNote:'', ...e }));
-    await store.set(KEY_EVENTS, EVENTS);
-    renderAdminList(); render(); toast('Backup restaurado');
+    EVENTS = normalize(arr);
+    selectedDate = dates().includes(selectedDate) ? selectedDate : dates()[0];
+    commit('Backup restaurado e publicado');
   }catch(e){ toast('Arquivo inválido. Use um backup baixado aqui.'); }
   ev.target.value='';
 };
-$('#btnPinChange').onclick = async ()=>{
-  const v = prompt('Novo PIN (4 a 8 números):', '');
-  if(v===null) return;
+
+/* troca de PIN, sem prompt() */
+$('#btnPinChange').onclick = ()=>{
+  $('#pinBox').hidden = false;
+  $('#newPin').value = '';
+  $('#newPin').focus();
+};
+$('#btnPinCancel').onclick = ()=> { $('#pinBox').hidden = true; };
+$('#btnPinSave').onclick = async ()=>{
+  const v = $('#newPin').value.trim();
   if(!/^\d{4,8}$/.test(v)){ toast('Use de 4 a 8 números'); return; }
-  CONFIG.pin = v; await store.set(KEY_CONFIG, CONFIG);
-  toast('PIN atualizado');
+  CONFIG.pin = v;
+  const ok = await store.set(KEY_CONFIG, CONFIG);
+  $('#pinBox').hidden = true;
+  toast(ok ? 'PIN atualizado para a coordenação' : 'PIN alterado só neste aparelho');
 };
 
+/* volta do segundo plano ou troca de aparelho: busca a versão mais nova */
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) pull(); });
+setInterval(pull, 45000);
+
 /* ---------------- boot ---------------- */
-(async function init(){
+/* desenha na hora com os dados locais e reconcilia com o armazenamento em segundo plano,
+   para a tela nunca ficar em branco esperando rede */
+(function init(){
   fillTypeSelect();
 
-  const savedCfg = await store.get(KEY_CONFIG);
-  if(savedCfg && savedCfg.pin) CONFIG = savedCfg; else await store.set(KEY_CONFIG, CONFIG);
-
-  const saved = await store.get(KEY_EVENTS);
-  if(Array.isArray(saved) && saved.length) EVENTS = saved;
-  else { EVENTS = SEED.slice(); await store.set(KEY_EVENTS, EVENTS); }
-
+  EVENTS = normalize(SEED);
   const t = todayISO();
   selectedDate = dates().includes(t) ? t : (dates()[0] || t);
   render(); scrollRailTo();
+
+  (async ()=>{
+    const cfg = await store.get(KEY_CONFIG);
+    if(cfg && cfg.pin) CONFIG = cfg; else store.set(KEY_CONFIG, CONFIG);
+
+    const saved = await store.get(KEY_EVENTS);
+    if(Array.isArray(saved) && saved.length){
+      EVENTS = normalize(saved);
+      syncOk = true;
+      if(!dates().includes(selectedDate)) selectedDate = dates()[0] || selectedDate;
+      renderAdminList(); render(); scrollRailTo();
+    } else {
+      syncOk = await store.set(KEY_EVENTS, EVENTS);
+    }
+    renderSync();
+  })();
 
   setInterval(renderNextUp, 60000);
 })();
