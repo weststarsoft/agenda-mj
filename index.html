@@ -171,6 +171,30 @@
   }
   .tag.alert{background:rgba(232,49,129,.14);border-color:rgba(232,49,129,.4);color:#FFC0D8}
   .tag.who{background:rgba(0,149,219,.13);border-color:rgba(0,149,219,.35);color:#BFE6FB}
+  .tag.cancel{
+    background:rgba(255,255,255,.10);border-color:rgba(255,255,255,.34);color:#F2F5FF;
+    font-weight:700;letter-spacing:.08em;display:inline-flex;align-items:center;gap:5px
+  }
+
+  /* ---------- agenda cancelada ---------- */
+  .card.cancelled{
+    background:rgba(255,255,255,.022);border-style:dashed;border-color:rgba(255,255,255,.16)
+  }
+  .card.cancelled.simul{border-left-style:solid;border-left-color:rgba(232,49,129,.35)}
+  .card.cancelled h3{
+    text-decoration:line-through;text-decoration-thickness:1.5px;
+    text-decoration-color:rgba(237,242,255,.5);color:#AFBEE2
+  }
+  .card.cancelled .kind{opacity:.55}
+  .card.cancelled p,.card.cancelled .place,.card.cancelled .place span{color:#8FA0C9}
+  .card.cancelled .place svg{color:#8FA0C9}
+  .slot.cancelled .node{filter:grayscale(1);opacity:.45}
+  .slot.cancelled .time{opacity:.45;text-decoration:line-through}
+  .cancelnote{
+    margin-top:10px;font-size:12.5px;color:#C6D3F2;background:rgba(255,255,255,.05);
+    border:1px solid var(--line);border-radius:11px;padding:9px 11px
+  }
+  .cancelnote b{color:var(--ink);font-weight:700}
   .go{display:flex;gap:8px;margin-top:13px}
   .go a{
     flex:1;text-decoration:none;text-align:center;padding:10px 8px;border-radius:11px;
@@ -450,6 +474,20 @@
       </div>
     </div>
 
+    <div class="row">
+      <div class="field">
+        <label for="f_status">Situação</label>
+        <select id="f_status">
+          <option value="">Confirmada</option>
+          <option value="cancelada">Cancelada</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="f_cancelnote">Motivo do cancelamento</label>
+        <input id="f_cancelnote" type="text" placeholder="Chuva forte / remarcada para sexta" />
+      </div>
+    </div>
+
     <div class="actions">
       <button type="button" class="btn danger" id="btnDelete">Excluir</button>
       <button type="button" class="btn sec" id="btnCancelEdit">Cancelar</button>
@@ -542,6 +580,7 @@ const ICONS = {
 };
 const ICON_PIN = `<svg viewBox="0 0 24 24" width="15" height="15" ${S}><path d="M12 21s6.4-6 6.4-10.6A6.4 6.4 0 0 0 5.6 10.4C5.6 15 12 21 12 21z"/><circle cx="12" cy="10.2" r="2.2"/></svg>`;
 const ICON_WARN = `<svg viewBox="0 0 24 24" width="14" height="14" ${S}><path d="M12 4.5 3.5 19.5h17z"/><path d="M12 10v4"/><path d="M12 16.8h.01"/></svg>`;
+const ICON_CANCEL = `<svg viewBox="0 0 24 24" width="12" height="12" ${S}><circle cx="12" cy="12" r="8.4"/><path d="m8.6 8.6 6.8 6.8"/></svg>`;
 
 /* ---------------- dados iniciais (extraídos da agenda em PDF) ---------------- */
 const SEED = [
@@ -602,7 +641,7 @@ const SEED = [
 
   /* DOMINGO 13/09 */
   {date:'2026-09-13',period:'dia',type:'deslocamento',title:'Retorno para Cruzeiro do Sul',city:'Cruzeiro do Sul',who:'majoritario'}
-].map((e,i)=>({id:'s'+i, desc:'', place:'', resp:'', part:'', simul:'', pending:false, lat:'', lng:'', ...e}));
+].map((e,i)=>({id:'s'+i, desc:'', place:'', resp:'', part:'', simul:'', pending:false, lat:'', lng:'', status:'', cancelNote:'', ...e}));
 
 /* ---------------- estado ---------------- */
 let EVENTS = [];
@@ -683,8 +722,11 @@ function renderDayHead(){
   $('#dayCity').textContent = main.toUpperCase();
 
   const dt = parseISO(selectedDate);
+  const off = list.filter(e=>e.status==='cancelada').length;
+  const on = list.length - off;
   const parts = [`${WD_LONG[dt.getDay()]}, ${dt.getDate()} de ${MONTH[dt.getMonth()]}`];
-  parts.push(`${list.length} agenda${list.length===1?'':'s'}`);
+  parts.push(`${on} agenda${on===1?'':'s'}`);
+  if(off) parts.push(`${off} cancelada${off===1?'':'s'}`);
   const others = cities.slice(1);
   if(others.length) parts.push(`frentes também em ${others.join(' e ')}`);
   $('#dayMeta').textContent = parts.join(' · ');
@@ -715,7 +757,7 @@ function renderNextUp(){
   if(selectedDate !== t){ box.innerHTML = ''; return; }
   const now = new Date();
   const hhmm = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}`;
-  const todays = EVENTS.filter(e=>e.date===t).sort(byTime);
+  const todays = EVENTS.filter(e=>e.date===t && e.status!=='cancelada').sort(byTime);
   const next = todays.find(e => sortKey(e) >= hhmm);
   if(!next){ box.innerHTML = ''; return; }
 
@@ -755,20 +797,23 @@ function visible(){
 
 function eventCard(e){
   const ty = TYPES[e.type], g = GROUPS[ty.group];
-  const hasLoc = !!(e.place || (e.lat && e.lng) || e.city);
-  return `<article class="slot">
+  const off = e.status === 'cancelada';
+  const hasLoc = !off && !!(e.place || (e.lat && e.lng) || e.city);
+  return `<article class="slot ${off?'cancelled':''}">
     <div class="gutter">
       <div class="time">${e.time ? esc(e.time) : `<small>${esc(PERIOD_LABEL[e.period]||'—')}</small>`}</div>
       <div class="node" style="background:${g.color}1f;border-color:${g.color}59;color:${g.color}">${ICONS[e.type]}</div>
     </div>
-    <div class="card ${e.simul?'simul':''}">
+    <div class="card ${e.simul?'simul':''} ${off?'cancelled':''}">
       <div class="kind" style="color:${g.color}">${esc(ty.label)}</div>
       <h3>${esc(e.title)}</h3>
+      ${off?`<div class="cancelnote"><b>Agenda cancelada.</b> ${e.cancelNote?esc(e.cancelNote):'Não se deslocar para o local.'}</div>`:''}
       ${e.desc?`<p>${esc(e.desc)}</p>`:''}
       ${e.place?`<div class="place">${ICON_PIN}<span>${esc(e.place)}${e.city?` — ${esc(e.city)}`:''}</span></div>`
         : e.city?`<div class="place">${ICON_PIN}<span>${esc(e.city)}</span></div>`:''}
-      ${e.pending?`<div class="pending">${ICON_WARN} Local exato a confirmar com a coordenação</div>`:''}
+      ${e.pending && !off?`<div class="pending">${ICON_WARN} Local exato a confirmar com a coordenação</div>`:''}
       <div class="tags">
+        ${off?`<span class="tag cancel">${ICON_CANCEL} Cancelada</span>`:''}
         ${e.who?`<span class="tag who">${esc(WHO[e.who].label)}</span>`:''}
         ${e.simul?`<span class="tag alert">${esc(e.simul)}</span>`:''}
         ${e.resp?`<span class="tag">Responsável: ${esc(e.resp)}</span>`:''}
@@ -802,6 +847,9 @@ function dayText(){
   const lines = visible().map(e=>{
     const when = e.time || PERIOD_LABEL[e.period] || '';
     const loc = [e.place, e.city].filter(Boolean).join(' — ');
+    if(e.status === 'cancelada'){
+      return `~${when} • ${e.title}~\n   *CANCELADA*${e.cancelNote?` — ${e.cancelNote}`:''}`;
+    }
     return `${when} • ${e.title}${loc?`\n   ${loc}`:''}${e.simul?`\n   (${e.simul})`:''}`;
   });
   return [head, '', ...lines, '', 'Mailza 11 — Governadora | Vice Jéssica Sales'].join('\n');
@@ -831,9 +879,9 @@ function renderAdminList(){
   box.innerHTML = ds.map(d=>{
     const dt = parseISO(d);
     const rows = EVENTS.filter(e=>e.date===d).sort(byTime).map(e=>`
-      <div class="arow">
-        <div class="at">${esc(e.time || PERIOD_LABEL[e.period] || '—')}</div>
-        <div class="an">${esc(e.title)}<span>${esc([TYPES[e.type].label, e.place, e.city].filter(Boolean).join(' · '))}</span></div>
+      <div class="arow" ${e.status==='cancelada'?'style="opacity:.6"':''}>
+        <div class="at" ${e.status==='cancelada'?'style="text-decoration:line-through"':''}>${esc(e.time || PERIOD_LABEL[e.period] || '—')}</div>
+        <div class="an">${e.status==='cancelada'?`<s>${esc(e.title)}</s>`:esc(e.title)}<span>${e.status==='cancelada'?'Cancelada · ':''}${esc([TYPES[e.type].label, e.place, e.city].filter(Boolean).join(' · '))}</span></div>
         <button class="icon-btn" data-edit="${e.id}" title="Editar">
           <svg viewBox="0 0 24 24" width="15" height="15" ${S}><path d="M4 20h4l10-10-4-4L4 16z"/><path d="m14 6 4 4"/></svg>
         </button>
@@ -862,6 +910,8 @@ function openEdit(id){
   $('#f_part').value = e?.part || '';
   $('#f_simul').value = e?.simul || '';
   $('#f_pending').value = e?.pending ? '1' : '';
+  $('#f_status').value = e?.status || '';
+  $('#f_cancelnote').value = e?.cancelNote || '';
   $('#btnDelete').style.display = e ? '' : 'none';
   $('#dlgEdit').showModal();
 }
@@ -884,7 +934,9 @@ async function saveEvent(ev){
     resp: $('#f_resp').value.trim(),
     part: $('#f_part').value.trim(),
     simul: $('#f_simul').value,
-    pending: $('#f_pending').value === '1'
+    pending: $('#f_pending').value === '1',
+    status: $('#f_status').value,
+    cancelNote: $('#f_status').value === 'cancelada' ? $('#f_cancelnote').value.trim() : ''
   };
   if(!data.title || !data.date){ toast('Preencha título e data'); return; }
   if(!data.time && !data.period) data.period = 'dia';
@@ -896,7 +948,9 @@ async function saveEvent(ev){
   selectedDate = data.date;
   $('#dlgEdit').close();
   renderAdminList(); render();
-  toast(saved ? 'Agenda salva para o time' : 'Salvo só neste dispositivo (sem conexão de dados)');
+  toast(saved
+    ? (data.status === 'cancelada' ? 'Cancelamento publicado para o time' : 'Agenda salva para o time')
+    : 'Salvo só neste dispositivo (sem conexão de dados)');
 }
 
 async function deleteEvent(){
@@ -958,7 +1012,7 @@ $('#fileImport').onchange = async ev=>{
     const parsed = JSON.parse(await f.text());
     const arr = Array.isArray(parsed) ? parsed : parsed.events;
     if(!Array.isArray(arr)) throw new Error('formato');
-    EVENTS = arr.map((e,i)=>({ id:e.id||'i'+i, desc:'', place:'', resp:'', part:'', simul:'', pending:false, lat:'', lng:'', period:'', time:'', who:'majoritario', type:'reuniao', ...e }));
+    EVENTS = arr.map((e,i)=>({ id:e.id||'i'+i, desc:'', place:'', resp:'', part:'', simul:'', pending:false, lat:'', lng:'', period:'', time:'', who:'majoritario', type:'reuniao', status:'', cancelNote:'', ...e }));
     await store.set(KEY_EVENTS, EVENTS);
     renderAdminList(); render(); toast('Backup restaurado');
   }catch(e){ toast('Arquivo inválido. Use um backup baixado aqui.'); }
