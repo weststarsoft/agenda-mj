@@ -269,6 +269,11 @@
     border:1px solid rgba(232,49,129,.42);border-radius:11px;padding:10px 12px;margin-bottom:12px
   }
   .syncbad{color:#FFC46B}
+  .diag{
+    font-size:11px;color:#7C8FBD;font-variant-numeric:tabular-nums;
+    border:1px solid var(--line);border-radius:9px;padding:7px 9px;margin-bottom:12px;
+    word-break:break-word
+  }
   .note{
     font-size:12px;color:#FFC46B;background:rgba(255,196,107,.09);
     border:1px solid rgba(255,196,107,.25);border-radius:11px;padding:10px 12px;margin-bottom:14px
@@ -370,11 +375,13 @@
     <div class="sub" id="syncLine">As mudanças aparecem para todo o time na hora que você salva.</div>
     <div class="actions" style="justify-content:flex-start;margin-top:0;margin-bottom:8px">
       <button class="btn" type="button" id="btnNew">Nova agenda</button>
+      <button class="btn sec" type="button" id="btnRepublish">Publicar novamente</button>
       <button class="btn sec" type="button" id="btnExport">Baixar backup</button>
       <button class="btn sec" type="button" id="btnImport">Restaurar backup</button>
       <button class="btn sec" type="button" id="btnPinChange">Trocar PIN</button>
       <button class="btn sec" type="button" id="btnCloseAdmin">Fechar</button>
     </div>
+    <div class="diag" id="diagLine"></div>
     <div id="pinBox" hidden>
       <div class="field">
         <label for="newPin">Novo PIN (4 a 8 números)</label>
@@ -522,44 +529,54 @@
    Single-file. Dados compartilhados via window.storage (shared).
    ====================================================================== */
 
-const KEY_EVENTS = 'agenda:v1:events';
+const KEY_EVENTS = 'agenda:v2:events';
+const KEY_LEGACY = 'agenda:v1:events';
 const KEY_CONFIG = 'agenda:v1:config';
 const DEFAULT_PIN = '1111';
 
-/* ---------------- storage (com timeout, fallback e verificação) ---------------- */
+/* ---------------- persistência ----------------
+   Grava em dois lugares: compartilhado (todo o time vê) e local (só este aparelho).
+   Cada gravação leva uma versão. Ao abrir, vale a versão mais nova encontrada.
+   Nunca sobrescreve dados salvos quando a leitura falha — só quando ela volta vazia. */
 const mem = {};
-let syncOk = false;     // última gravação chegou ao armazenamento compartilhado?
-let dirty  = false;     // existe alteração local ainda não publicada?
+let localV = 0;                                   // versão dos dados em memória
+let cap = { api:false, shared:false, local:false, failed:false, err:'', lastTry:'' };
 
 function withTimeout(promise, ms){
   return Promise.race([
     promise,
-    new Promise((_,rej)=> setTimeout(()=> rej(new Error('timeout')), ms))
+    new Promise((_,rej)=> setTimeout(()=> rej(new Error('tempo esgotado')), ms))
   ]);
 }
+function hasApi(){
+  return typeof window !== 'undefined' && window.storage
+    && typeof window.storage.get === 'function' && typeof window.storage.set === 'function';
+}
 
-const store = {
-  ok(){ return typeof window !== 'undefined' && window.storage && typeof window.storage.get === 'function'; },
-  async get(k){
-    if(this.ok()){
-      try{
-        const r = await withTimeout(window.storage.get(k, true), 4000);
-        if(r && r.value) return JSON.parse(r.value);
-      }catch(e){ /* chave inexistente, offline ou lento */ }
-    }
-    return mem[k] ?? null;
-  },
-  async set(k,v){
-    mem[k] = v;                                  // memória primeiro: a tela nunca fica travada
-    if(this.ok()){
-      try{
-        await withTimeout(window.storage.set(k, JSON.stringify(v), true), 5000);
-        return true;
-      }catch(e){ return false; }
-    }
+/* leitura: devolve o motivo, para o app não confundir "vazio" com "falhou" */
+async function rawGet(key, shared){
+  if(!hasApi()) return { status:'noapi' };
+  try{
+    const r = await withTimeout(window.storage.get(key, shared), 6000);
+    if(r && r.value) return { status:'hit', data: JSON.parse(r.value) };
+    return { status:'empty' };
+  }catch(e){
+    const m = String((e && e.message) || e);
+    if(/missing|not ?found|no such|404/i.test(m)) return { status:'empty' };
+    cap.err = m;
+    return { status:'error', err:m };
+  }
+}
+async function rawSet(key, obj, shared){
+  if(!hasApi()) return false;
+  try{
+    await withTimeout(window.storage.set(key, JSON.stringify(obj), shared), 8000);
+    return true;
+  }catch(e){
+    cap.err = String((e && e.message) || e);
     return false;
   }
-};
+}
 
 /* ---------------- tipos e grupos ---------------- */
 const GROUPS = {
@@ -998,14 +1015,36 @@ function readForm(){
   };
 }
 
-/* grava em memória, redesenha na hora e só então tenta publicar */
+/* redesenha na hora e publica em seguida, nos dois destinos, com leitura de volta */
 async function commit(msgOk){
-  dirty = true;
+  localV = Date.now();
+  cap.lastTry = 'publicando';
   renderSync(); renderAdminList(); render();
-  const ok = await store.set(KEY_EVENTS, EVENTS);
-  syncOk = ok; dirty = !ok;
+
+  const env = { v: localV, events: EVENTS };
+  const okShared = await rawSet(KEY_EVENTS, env, true);
+  const okLocal  = await rawSet(KEY_EVENTS, env, false);
+
+  /* confirma lendo de volta: só assim a mensagem de "publicado" é verdadeira */
+  let confirmado = false;
+  if(okShared){
+    const back = await rawGet(KEY_EVENTS, true);
+    confirmado = back.status === 'hit' && Number(back.data && back.data.v) === localV;
+  }
+  cap.api = hasApi();
+  cap.shared = confirmado;
+  cap.local = okLocal;
+  cap.failed = !confirmado && !okLocal;
+  cap.lastTry = '';
   renderSync();
-  toast(ok ? msgOk : 'Salvo neste aparelho. Sem conexão com o armazenamento — o time ainda não vê.');
+
+  if(confirmado)      toast(msgOk);
+  else if(okLocal)    toast('Salvo neste aparelho e resiste ao recarregar. O time ainda não vê — toque em Publicar novamente.');
+  else                toast('Este ambiente não guardou a alteração. Use Baixar backup antes de fechar.');
+}
+
+async function republish(){
+  await commit('Agenda publicada para o time');
 }
 
 function saveEvent(){
@@ -1054,27 +1093,41 @@ function askDelete(){
 /* ---------------- sincronização entre aparelhos ---------------- */
 function renderSync(){
   const el = $('#syncLine'); if(!el) return;
-  if(dirty){
-    el.className = 'sub syncbad';
-    el.textContent = 'Alteração salva só neste aparelho. Toque em Salvar novamente quando a conexão voltar.';
-  } else if(syncOk){
+  const diag = $('#diagLine');
+  if(diag) diag.textContent =
+    `armazenamento: ${cap.api?'disponível':'ausente neste ambiente'} · compartilhado: ${cap.shared?'ok':'não'} · `
+    + `aparelho: ${cap.local?'ok':'não'} · agendas: ${EVENTS.length}`
+    + (localV?` · versão ${new Date(localV).toLocaleTimeString('pt-BR')}`:'')
+    + (cap.err?` · último erro: ${cap.err}`:'');
+
+  if(cap.lastTry){ el.className='sub'; el.textContent='Publicando…'; return; }
+  if(cap.shared){
     el.className = 'sub';
     el.textContent = 'Publicado. O time vê a agenda atualizada.';
+  } else if(cap.local){
+    el.className = 'sub syncbad';
+    el.textContent = 'Salvo neste aparelho — resiste ao recarregar, mas o time ainda não vê. Toque em Publicar novamente.';
+  } else if(!cap.api || cap.failed){
+    el.className = 'sub syncbad';
+    el.textContent = 'Este ambiente não guardou a alteração: ao recarregar, a agenda volta ao original. Baixe o backup para não perder o trabalho.';
   } else {
     el.className = 'sub';
     el.textContent = 'As mudanças aparecem para todo o time na hora que você salva.';
   }
 }
 
+/* pega a versão mais nova do armazenamento compartilhado */
 async function pull(){
-  if(dirty) return;                      // nunca sobrescreve alteração não publicada
-  const saved = await store.get(KEY_EVENTS);
-  if(!Array.isArray(saved) || !saved.length) return;
-  const fresh = normalize(saved);
-  if(JSON.stringify(fresh) === JSON.stringify(EVENTS)) return;
-  EVENTS = fresh;
-  if(!dates().includes(selectedDate)) selectedDate = dates()[0];
-  renderAdminList(); render();
+  const r = await rawGet(KEY_EVENTS, true);
+  if(r.status !== 'hit') return;
+  const v = Number(r.data && r.data.v) || 0;
+  const arr = (r.data && r.data.events) || (Array.isArray(r.data) ? r.data : null);
+  if(!Array.isArray(arr) || !arr.length) return;
+  if(v <= localV) return;                       // o que está na tela é mais novo ou igual
+  EVENTS = normalize(arr); localV = v; cap.shared = true;
+  if(!dates().includes(selectedDate)) selectedDate = dates()[0] || selectedDate;
+  renderSync(); renderAdminList(); render();
+  toast('Agenda atualizada pela coordenação');
 }
 
 /* ---------------- diálogos (com fallback se showModal não existir) ---------------- */
@@ -1124,6 +1177,7 @@ $('#pin').onkeydown = e => { if(e.key === 'Enter') $('#pinOk').click(); };
 /* formulário */
 $('#btnNew').onclick = ()=> openEdit(null);
 $('#btnCloseAdmin').onclick = ()=> closeDlg('#dlgAdmin');
+$('#btnRepublish').onclick = republish;
 $('#btnSave').onclick = saveEvent;
 $('#btnCancelEdit').onclick = ()=>{
   pendingDelete = null; $('#btnDelete').textContent = 'Excluir'; showEditErr('');
@@ -1173,7 +1227,7 @@ $('#btnPinSave').onclick = async ()=>{
   const v = $('#newPin').value.trim();
   if(!/^\d{4,8}$/.test(v)){ toast('Use de 4 a 8 números'); return; }
   CONFIG.pin = v;
-  const ok = await store.set(KEY_CONFIG, CONFIG);
+  const ok = (await rawSet(KEY_CONFIG, CONFIG, true)) || (await rawSet(KEY_CONFIG, CONFIG, false));
   $('#pinBox').hidden = true;
   toast(ok ? 'PIN atualizado para a coordenação' : 'PIN alterado só neste aparelho');
 };
@@ -1183,10 +1237,9 @@ document.addEventListener('visibilitychange', ()=>{ if(!document.hidden) pull();
 setInterval(pull, 45000);
 
 /* ---------------- boot ---------------- */
-/* desenha na hora com os dados locais e reconcilia com o armazenamento em segundo plano,
-   para a tela nunca ficar em branco esperando rede */
 (function init(){
   fillTypeSelect();
+  cap.api = hasApi();
 
   EVENTS = normalize(SEED);
   const t = todayISO();
@@ -1194,18 +1247,52 @@ setInterval(pull, 45000);
   render(); scrollRailTo();
 
   (async ()=>{
-    const cfg = await store.get(KEY_CONFIG);
-    if(cfg && cfg.pin) CONFIG = cfg; else store.set(KEY_CONFIG, CONFIG);
+    /* configuração */
+    const cfgS = await rawGet(KEY_CONFIG, true);
+    const cfgL = cfgS.status === 'hit' ? cfgS : await rawGet(KEY_CONFIG, false);
+    if(cfgL.status === 'hit' && cfgL.data && cfgL.data.pin) CONFIG = cfgL.data;
 
-    const saved = await store.get(KEY_EVENTS);
-    if(Array.isArray(saved) && saved.length){
-      EVENTS = normalize(saved);
-      syncOk = true;
+    /* três origens possíveis: compartilhado, este aparelho e o formato antigo */
+    const [sh, lo, legacy] = await Promise.all([
+      rawGet(KEY_EVENTS, true),
+      rawGet(KEY_EVENTS, false),
+      rawGet(KEY_LEGACY, true)
+    ]);
+
+    const cand = [];
+    const push = (r, viaShared) => {
+      if(r.status !== 'hit') return;
+      const arr = (r.data && r.data.events) || (Array.isArray(r.data) ? r.data : null);
+      if(Array.isArray(arr) && arr.length) cand.push({ v: Number(r.data && r.data.v) || 1, arr, viaShared });
+    };
+    push(sh, true); push(lo, false); push(legacy, true);
+
+    if(cand.length){
+      cand.sort((a,b)=> b.v - a.v);
+      const best = cand[0];
+      EVENTS = normalize(best.arr);
+      localV = best.v;
+      cap.shared = !!(sh.status === 'hit' && cand.some(c=>c.viaShared && c.v === best.v));
+      cap.local = lo.status === 'hit';
       if(!dates().includes(selectedDate)) selectedDate = dates()[0] || selectedDate;
-      renderAdminList(); render(); scrollRailTo();
-    } else {
-      syncOk = await store.set(KEY_EVENTS, EVENTS);
+      render(); scrollRailTo(); renderAdminList();
+
+      /* dado no formato antigo ou só no aparelho: republica no formato novo */
+      if(sh.status === 'empty' || (legacy.status === 'hit' && sh.status !== 'hit')){
+        localV = Date.now();
+        const env = { v: localV, events: EVENTS };
+        cap.shared = await rawSet(KEY_EVENTS, env, true);
+        cap.local  = await rawSet(KEY_EVENTS, env, false);
+      }
+    } else if(sh.status === 'empty' || lo.status === 'empty'){
+      /* primeira vez de verdade: grava a agenda inicial */
+      localV = Date.now();
+      const env = { v: localV, events: EVENTS };
+      cap.shared = await rawSet(KEY_EVENTS, env, true);
+      cap.local  = await rawSet(KEY_EVENTS, env, false);
     }
+    /* se as leituras deram erro, não grava nada: evita apagar o trabalho do time */
+
     renderSync();
   })();
 
