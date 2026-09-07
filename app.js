@@ -419,15 +419,16 @@ function eventCard(e) {
       <div class="node" style="background:${g.color}1f;border-color:${g.color}59;color:${g.color}">${ICONS[e.type]}</div>
     </div>
     <div class="card ${e.simul ? 'simul' : ''} ${off ? 'cancelled' : ''}">
-      <div class="kind" style="color:${g.color}">${esc(ty.label)}</div>
+      ${off
+        ? `<div class="kindrow"><span class="flag-cancel">${ICON_CANCEL} Cancelada</span><span class="kind" style="color:${g.color}">${esc(ty.label)}</span></div>`
+        : `<div class="kind" style="color:${g.color}">${esc(ty.label)}</div>`}
       <h3>${esc(e.title)}</h3>
-      ${off ? `<div class="cancelnote"><b>Agenda cancelada.</b> ${e.cancelNote ? esc(e.cancelNote) : 'Não se deslocar para o local.'}</div>` : ''}
+      ${off ? `<div class="cancelnote"><b>Esta agenda não vai acontecer.</b> ${e.cancelNote ? esc(e.cancelNote) : 'Não se deslocar para o local.'}</div>` : ''}
       ${e.desc ? `<p>${esc(e.desc)}</p>` : ''}
       ${e.place ? `<div class="place">${ICON_PIN}<span>${esc(e.place)}${e.city ? ` — ${esc(e.city)}` : ''}</span></div>`
         : e.city ? `<div class="place">${ICON_PIN}<span>${esc(e.city)}</span></div>` : ''}
       ${e.pending && !off ? `<div class="pending">${ICON_WARN} Local exato a confirmar com a coordenação</div>` : ''}
       <div class="tags">
-        ${off ? `<span class="tag cancel">${ICON_CANCEL} Cancelada</span>` : ''}
         ${e.who ? `<span class="tag who">${esc(WHO[e.who].label)}</span>` : ''}
         ${e.simul ? `<span class="tag alert">${esc(e.simul)}</span>` : ''}
         ${e.resp ? `<span class="tag">Responsável: ${esc(e.resp)}</span>` : ''}
